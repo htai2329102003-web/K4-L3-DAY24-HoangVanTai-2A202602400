@@ -52,4 +52,7 @@ class PolicyContext:
 
 
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    """Apply the baseline PEP rule for data classification and egress."""
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return False, "deny: restricted data cannot be sent through an egress-enabled run"
+    return True, "allow: data classification and egress satisfy the baseline policy"
