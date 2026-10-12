@@ -59,7 +59,15 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from pathlib import Path
+import re
+from uuid import uuid4
+
+from agent import tools
+from agent.policy import PolicyContext, check
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
@@ -69,6 +77,61 @@ class RunnerScaffoldPending(NotImplementedError):
     """Only the original 3c stub uses this to enable the CP1/CP2 baseline."""
 
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+CUSTOMERS_FILE = BASE_DIR / "data" / "customers.json"
+_TICKET_ID_RE = re.compile(r"^ticket-(\d+)(?:[a-z]+)?\.md$", re.IGNORECASE)
+
+
+def _customer_ids_for_tickets(ticket_ids: set[int]) -> list[str]:
+    """Map trusted filename IDs to customers without inspecting ticket text."""
+    customers = json.loads(CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    return [str(record["customer_id"]) for record in customers
+            if ticket_ids.intersection(record.get("related_tickets", []))]
+
+
+def _append_audit(entry: dict, path: Path) -> None:
+    """CP3c audit record; CP3e will make this append-only and hash-chained."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as audit_file:
+        audit_file.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _args_hash(args: dict) -> str:
+    return hashlib.sha256(json.dumps(args, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    ledger_path = log_dir / "ledger.jsonl" if log_dir else DEFAULT_LEDGER_PATH
+    run_id = str(uuid4())
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+
+    def call_tool(tool_name: str, classification: str, agent_id: str,
+                  agent_scopes: tuple[str, ...], args: dict, invoke):
+        allowed, reason = check(PolicyContext(
+            data_classification=classification, request_purpose="support-reply",
+            agent_owner=agent_id, delegation_depth=0, egress_enabled=False,
+            principal_id=principal_id, requested_tool=tool_name,
+            agent_scopes=agent_scopes, expires_at=expires_at,
+        ))
+        _append_audit({
+            "ts": datetime.now(timezone.utc).isoformat(), "agent_id": agent_id,
+            "run_id": run_id, "tool": tool_name, "args_hash": _args_hash(args),
+            "classification": classification, "decision": "allow" if allowed else "deny",
+            "reason": reason, "on_behalf_of": principal_id, "expires_at": expires_at,
+        }, ledger_path)
+        return invoke() if allowed else None
+
+    docs = call_tool(
+        "search_docs", "internal", "lab24-agent/run-a", ("search_docs",),
+        {"query": message}, lambda: tools.search_docs(message),
+    ) or []
+    ticket_ids = {int(match.group(1)) for doc in docs
+                  if (match := _TICKET_ID_RE.fullmatch(str(doc.get("id", ""))))}
+    for customer_id in _customer_ids_for_tickets(ticket_ids):
+        call_tool(
+            "read_customer", "restricted", "lab24-agent/run-b", ("read_customer",),
+            {"customer_id": customer_id},
+            lambda customer_id=customer_id: tools.read_customer(customer_id),
+        )
+    return llm.summarize(docs)

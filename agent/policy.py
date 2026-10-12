@@ -35,6 +35,12 @@ không phải xác thực người dùng production.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+
+
+PRINCIPALS_FILE = Path(__file__).resolve().parent.parent / "data" / "principals.json"
 
 
 @dataclass(frozen=True)
@@ -52,7 +58,31 @@ class PolicyContext:
 
 
 def check(context: PolicyContext) -> tuple[bool, str]:
-    """Apply the baseline PEP rule for data classification and egress."""
+    """Apply egress and on-behalf-of authorization before a tool call."""
     if context.data_classification == "restricted" and context.egress_enabled:
         return False, "deny: restricted data cannot be sent through an egress-enabled run"
-    return True, "allow: data classification and egress satisfy the baseline policy"
+
+    try:
+        principals = json.loads(PRINCIPALS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, "deny: trusted principal registry is unavailable"
+    principal = principals.get(context.principal_id)
+    if principal is None:
+        return False, "deny: unknown principal"
+    if context.request_purpose not in principal.get("purposes", []):
+        return False, "deny: principal is not authorized for this purpose"
+    if context.requested_tool not in principal.get("allowed_tools", []):
+        return False, "deny: principal is not authorized for this tool"
+    if context.requested_tool not in context.agent_scopes:
+        return False, "deny: requested tool is outside the agent scope"
+    if context.delegation_depth > 0 and context.requested_tool not in context.parent_scopes:
+        return False, "deny: requested tool exceeds the parent scope"
+    try:
+        expires_at = datetime.fromisoformat(context.expires_at.replace("Z", "+00:00"))
+        if expires_at.tzinfo is None:
+            return False, "deny: delegation expiry must include a timezone"
+    except (AttributeError, ValueError):
+        return False, "deny: invalid delegation expiry"
+    if expires_at <= datetime.now(timezone.utc):
+        return False, "deny: delegation has expired"
+    return True, "allow: principal, purpose, scopes, and delegation expiry are valid"
