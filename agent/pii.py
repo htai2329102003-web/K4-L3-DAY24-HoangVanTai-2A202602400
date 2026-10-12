@@ -30,10 +30,48 @@ set ở tests/vn_pii_testset.jsonl):
 """
 from __future__ import annotations
 
+import re
+
+
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b")
+_CCCD_RE = re.compile(r"(?<!\d)\d{12}(?!\d)")
+_PHONE_RE = re.compile(r"(?<!\d)0(?:[ -]?\d){9,10}(?!\d)")
+_BANK_RE = re.compile(
+    r"(?i)\b(?:stk|số\s+tài\s+khoản)\b\s*[:#-]?\s*(\d{8,16})(?!\d)"
+)
+
+
+def _overlaps(left: dict, right: dict) -> bool:
+    return left["start"] < right["end"] and right["start"] < left["end"]
+
 
 def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+    """Return non-overlapping PII spans with offsets into ``text``.
+
+    A 12-digit bank account can also resemble a CCCD, so labelled bank-account
+    spans take precedence over the generic numeric recognizers.
+    """
+    candidates: list[tuple[int, dict]] = []
+
+    for match in _EMAIL_RE.finditer(text):
+        candidates.append((3, {"type": "EMAIL", "start": match.start(), "end": match.end()}))
+    for match in _BANK_RE.finditer(text):
+        candidates.append((0, {"type": "VN_BANK_ACCOUNT", "start": match.start(1), "end": match.end(1)}))
+    for match in _CCCD_RE.finditer(text):
+        candidates.append((1, {"type": "VN_CCCD", "start": match.start(), "end": match.end()}))
+    for match in _PHONE_RE.finditer(text):
+        candidates.append((2, {"type": "VN_PHONE", "start": match.start(), "end": match.end()}))
+
+    selected: list[dict] = []
+    for _, entity in sorted(candidates, key=lambda item: (item[0], item[1]["start"], item[1]["end"])):
+        if not any(_overlaps(entity, existing) for existing in selected):
+            selected.append(entity)
+    return sorted(selected, key=lambda entity: (entity["start"], entity["end"]))
 
 
 def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+    redacted = text
+    for entity in reversed(detect(text)):
+        replacement = f"[REDACTED_{entity['type']}]"
+        redacted = redacted[: entity["start"]] + replacement + redacted[entity["end"] :]
+    return redacted
