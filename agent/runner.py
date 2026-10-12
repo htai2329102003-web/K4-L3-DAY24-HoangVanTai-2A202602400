@@ -100,6 +100,28 @@ def _args_hash(args: dict) -> str:
     return hashlib.sha256(json.dumps(args, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _run_a(message: str, llm, call_tool) -> tuple[str, set[int]]:
+    """Read untrusted tickets and emit only typed filename IDs to Run B."""
+    docs = call_tool(
+        "search_docs", "internal", "lab24-agent/run-a", ("search_docs",),
+        {"query": message}, lambda: tools.search_docs(message),
+    ) or []
+    llm.find_injection("\n\n".join(str(doc.get("text", "")) for doc in docs))
+    ticket_ids = {int(match.group(1)) for doc in docs
+                  if (match := _TICKET_ID_RE.fullmatch(str(doc.get("id", ""))))}
+    return llm.summarize(docs), ticket_ids
+
+
+def _run_b(ticket_ids: set[int], call_tool) -> None:
+    """Resolve only trusted ticket IDs; it never receives ticket free text."""
+    for customer_id in _customer_ids_for_tickets(ticket_ids):
+        call_tool(
+            "read_customer", "restricted", "lab24-agent/run-b", ("read_customer",),
+            {"customer_id": customer_id},
+            lambda customer_id=customer_id: tools.read_customer(customer_id),
+        )
+
+
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
     ledger_path = log_dir / "ledger.jsonl" if log_dir else DEFAULT_LEDGER_PATH
@@ -122,16 +144,6 @@ def handle(message: str, llm, log_dir: Path | None = None,
         }, ledger_path)
         return invoke() if allowed else None
 
-    docs = call_tool(
-        "search_docs", "internal", "lab24-agent/run-a", ("search_docs",),
-        {"query": message}, lambda: tools.search_docs(message),
-    ) or []
-    ticket_ids = {int(match.group(1)) for doc in docs
-                  if (match := _TICKET_ID_RE.fullmatch(str(doc.get("id", ""))))}
-    for customer_id in _customer_ids_for_tickets(ticket_ids):
-        call_tool(
-            "read_customer", "restricted", "lab24-agent/run-b", ("read_customer",),
-            {"customer_id": customer_id},
-            lambda customer_id=customer_id: tools.read_customer(customer_id),
-        )
-    return llm.summarize(docs)
+    summary, ticket_ids = _run_a(message, llm, call_tool)
+    _run_b(ticket_ids, call_tool)
+    return summary
