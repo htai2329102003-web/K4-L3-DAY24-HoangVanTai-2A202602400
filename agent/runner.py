@@ -66,7 +66,7 @@ from pathlib import Path
 import re
 from uuid import uuid4
 
-from agent import tools
+from agent import ledger, tools
 from agent.policy import PolicyContext, check
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
@@ -87,13 +87,6 @@ def _customer_ids_for_tickets(ticket_ids: set[int]) -> list[str]:
     customers = json.loads(CUSTOMERS_FILE.read_text(encoding="utf-8"))
     return [str(record["customer_id"]) for record in customers
             if ticket_ids.intersection(record.get("related_tickets", []))]
-
-
-def _append_audit(entry: dict, path: Path) -> None:
-    """CP3c audit record; CP3e will make this append-only and hash-chained."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as audit_file:
-        audit_file.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _args_hash(args: dict) -> str:
@@ -136,7 +129,7 @@ def handle(message: str, llm, log_dir: Path | None = None,
             principal_id=principal_id, requested_tool=tool_name,
             agent_scopes=agent_scopes, expires_at=expires_at,
         ))
-        _append_audit({
+        ledger.append({
             "ts": datetime.now(timezone.utc).isoformat(), "agent_id": agent_id,
             "run_id": run_id, "tool": tool_name, "args_hash": _args_hash(args),
             "classification": classification, "decision": "allow" if allowed else "deny",
