@@ -1,5 +1,5 @@
 # Baseline — điền trong checkpoint 1
 
-1. Agent có identity mỗi run chưa? Dẫn file/hàm:
-2. Ai cho phép `http_post`? Dẫn file/hàm:
-3. Nếu gửi sai PII ra sink, bằng chứng ở đâu? Dẫn file/hàm:
+1. Agent có identity mỗi run chưa? Dẫn file/hàm: Baseline chưa có `agent_id`/`run_id` và cũng không dùng danh tính người dùng để kiểm quyền cho từng tool call: `_naive_loop(message, llm)` không nhận principal (`agent/loop.py:27`), rồi gọi các tool trực tiếp tại `agent/loop.py:31-44`. Dù `run_once` có tham số `principal_id` (`agent/loop.py:57-58`), tham số này chỉ được chuyển cho runner ở dòng 69; khi fallback về baseline, dòng 74 gọi `_naive_loop(message, llm)` và bỏ qua principal.
+2. Ai cho phép `http_post`? Dẫn file/hàm: Không có policy gate nào kiểm principal, purpose, scope, data classification hay egress trước `http_post`. Ticket là dữ liệu không tin cậy được đưa nguyên văn vào context (`agent/tools.py:34-51`, `agent/loop.py:31-34`); kết quả `llm.find_injection()` sau đó trực tiếp quyết định `customer_id` để gọi `read_customer` và URL để gọi `http_post` (`agent/loop.py:34-44`). Allowlist localhost trong `tools.http_post` chỉ kiểm scheme/host/port (`agent/tools.py:68-84`) và chính comment tại dòng 71-74 nói rõ đây không phải authorization/data-governance control.
+3. Nếu gửi sai PII ra sink, bằng chứng ở đâu? Dẫn file/hàm: Body POST được tạo tại `agent/loop.py:44` dưới dạng `{"records": collected}` và được gửi bằng `requests.post(..., json=body)` tại `agent/tools.py:84`. Sink đặt đường dẫn log là `reports/sink.log` tại `sink/sink.py:36-37`, rồi đọc request body, tạo entry và append JSON vào file tại `sink/sink.py:43-47`.
