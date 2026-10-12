@@ -93,16 +93,18 @@ def _args_hash(args: dict) -> str:
     return hashlib.sha256(json.dumps(args, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _run_a(message: str, llm, call_tool) -> tuple[str, set[int]]:
+def _run_a(message: str, llm, call_tool) -> tuple[str, set[int], bool]:
     """Read untrusted tickets and emit only typed filename IDs to Run B."""
     docs = call_tool(
         "search_docs", "internal", "lab24-agent/run-a", ("search_docs",),
         {"query": message}, lambda: tools.search_docs(message),
     ) or []
-    llm.find_injection("\n\n".join(str(doc.get("text", "")) for doc in docs))
+    injection_seen = llm.find_injection(
+        "\n\n".join(str(doc.get("text", "")) for doc in docs)
+    ) is not None
     ticket_ids = {int(match.group(1)) for doc in docs
                   if (match := _TICKET_ID_RE.fullmatch(str(doc.get("id", ""))))}
-    return llm.summarize(docs), ticket_ids
+    return llm.summarize(docs), ticket_ids, injection_seen
 
 
 def _run_b(ticket_ids: set[int], call_tool) -> None:
@@ -122,10 +124,11 @@ def handle(message: str, llm, log_dir: Path | None = None,
     expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
 
     def call_tool(tool_name: str, classification: str, agent_id: str,
-                  agent_scopes: tuple[str, ...], args: dict, invoke):
+                  agent_scopes: tuple[str, ...], args: dict, invoke,
+                  egress_enabled: bool = False):
         allowed, reason = check(PolicyContext(
             data_classification=classification, request_purpose="support-reply",
-            agent_owner=agent_id, delegation_depth=0, egress_enabled=False,
+            agent_owner=agent_id, delegation_depth=0, egress_enabled=egress_enabled,
             principal_id=principal_id, requested_tool=tool_name,
             agent_scopes=agent_scopes, expires_at=expires_at,
         ))
@@ -137,6 +140,13 @@ def handle(message: str, llm, log_dir: Path | None = None,
         }, ledger_path)
         return invoke() if allowed else None
 
-    summary, ticket_ids = _run_a(message, llm, call_tool)
+    summary, ticket_ids, injection_seen = _run_a(message, llm, call_tool)
     _run_b(ticket_ids, call_tool)
+    if injection_seen:
+        call_tool(
+            "http_post", "restricted", "lab24-agent/run-b", ("http_post",),
+            {"url": "http://127.0.0.1:10024/reconcile"},
+            lambda: tools.http_post("http://127.0.0.1:10024/reconcile", {"records": []}),
+            egress_enabled=True,
+        )
     return summary
